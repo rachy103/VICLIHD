@@ -1,0 +1,11 @@
+__pycache__
+wandb/
+outputs/
+*.pt
+logs
+saved_models/
+*.json
+exp_local/
+eval_video/
+*.html
+*egg-info/
