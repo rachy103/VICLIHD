@@ -1,0 +1,6 @@
+[submodule "VIOLA"]
+	path = VIOLA
+	url = https://github.com/UT-Austin-RPL/VIOLA
+[submodule "hdp"]
+	path = hdp
+	url = https://github.com/dyson-ai/hdp
