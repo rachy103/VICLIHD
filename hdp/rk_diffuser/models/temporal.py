@@ -240,6 +240,11 @@ class Temporal(nn.Module):
                     nn.Mish(),
                     nn.Linear(resnet.n_channel, dim),
                 )
+            elif cond_name == "context_seq":
+                # 입력: (B, H, 256) → GRU → (B, dim)
+                condition_fns[cond_name] = nn.GRU(
+                    input_size=256, hidden_size=dim, num_layers=1, batch_first=True
+                )
             else:
                 condition_fns[cond_name] = nn.Sequential(
                     nn.Linear(mlp_shape_mapping[cond_name], dim),
@@ -307,8 +312,12 @@ class Temporal(nn.Module):
 
             if cond_name == "rgbs":
                 cond_var = cond_var.permute(0, 3, 1, 2)
-
-            cond_emb = self._cond_fns[cond_name](cond_var)
+            if cond_name == "context_seq":
+                # GRU expects (B, H, C); take last hidden state
+                out, h_n = self._cond_fns[cond_name](cond_var)
+                cond_emb = h_n[-1]
+            else:
+                cond_emb = self._cond_fns[cond_name](cond_var)
             allow_dropout = cond_name not in self._hard_conditions
             if use_dropout and allow_dropout:
                 mask = self._mask_dist.sample(sample_shape=(cond_emb.size(0), 1)).to(

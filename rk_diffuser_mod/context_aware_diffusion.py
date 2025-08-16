@@ -90,6 +90,10 @@ class ContextAwareGaussianDynDiffusion(nn.Module):
             "context_seq": ctx_seq,
             "context_fused": ctx_fused,
         }
+        # 베이스 샘플러가 cond[0] 길이로 배치 크기를 추정하는 경우가 있어, 비어있으면 더미 cond를 넣어줌
+        if len(cond_out) == 0:
+            Bsize = ctx_bhd.shape[0]
+            cond_out = {0: torch.zeros(Bsize, device=ctx_bhd.device)}
         return cond_out, extra_kwargs
 
     def loss(

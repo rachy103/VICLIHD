@@ -4,11 +4,13 @@ from detectron2.engine import DefaultPredictor
 from detectron2.config import get_cfg
 from detectron2.utils.visualizer import Visualizer
 from detectron2.data import MetadataCatalog, DatasetCatalog
-
-# Detic libraries
+from pathlib import Path
 import sys
-sys.path.insert(0, 'third_party/Detic/third_party/CenterNet2/projects/CenterNet2/')
-sys.path.insert(0, 'third_party/Detic/')
+# Detic libraries with absolute paths
+_THIS = Path(__file__).resolve()
+_REPO = _THIS.parents[1]
+sys.path.insert(0, str(_REPO / 'third_party' / 'Detic' / 'third_party' / 'CenterNet2' / 'projects' / 'CenterNet2'))
+sys.path.insert(0, str(_REPO / 'third_party' / 'Detic'))
 from centernet.config import add_centernet_config
 from detic.config import add_detic_config
 
@@ -16,9 +18,10 @@ from detic.config import add_detic_config
 detic_cfg = get_cfg()
 add_centernet_config(detic_cfg)
 add_detic_config(detic_cfg)
-detic_cfg.merge_from_file("third_party/Detic/configs/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml")
-# cfg.MODEL.WEIGHTS = 'https://dl.fbaipublicfiles.com/detic/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth'
-detic_cfg.MODEL.WEIGHTS = 'third_party/Detic/models/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth'
+detic_cfg.merge_from_file(str(_REPO / 'third_party' / 'Detic' / 'configs' / 'Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.yaml'))
+# Weights path (local file)
+detic_cfg.MODEL.WEIGHTS = str(_REPO / 'third_party' / 'Detic' / 'models' / 'Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth')
+detic_cfg.MODEL.DEVICE = 'cpu'
 detic_cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.1  # set threshold for this model
 detic_cfg.TEST.DETECTIONS_PER_IMAGE = 7
 detic_cfg.MODEL.ROI_BOX_HEAD.ZEROSHOT_WEIGHT_PATH = 'rand'
@@ -31,8 +34,8 @@ def update_path(d):
         else:
             if type(v) is str:
                 if "datasets/" in v:
-                    d[k] = v.replace("datasets/", "third_party/Detic/datasets/")
-                    print(d[k])
+                    rel = v.replace("datasets/", "third_party/Detic/datasets/")
+                    d[k] = str(_REPO / rel)
 update_path(detic_cfg)
 
 BUILDIN_CLASSIFIER = {

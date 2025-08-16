@@ -10,7 +10,19 @@ from einops.layers.torch import Rearrange
 # >>> fn = Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=8, p2=8)
 
 import robomimic
-from robomimic.models.base_nets import CropRandomizer, RNN_Base, Randomizer
+# robomimic 버전 호환: Randomizer/CropRandomizer 위치가 버전에 따라 다름
+try:
+    from robomimic.models.obs_core import Randomizer  # >=0.5.0
+except Exception:
+    from robomimic.models.base_nets import Randomizer  # older
+try:
+    from robomimic.models.obs_core import CropRandomizer  # >=0.5.0
+except Exception:
+    try:
+        from robomimic.models.base_nets import CropRandomizer  # some versions
+    except Exception:
+        from robomimic.utils.image_utils import CropRandomizer  # fallback
+from robomimic.models.base_nets import RNN_Base
 import torch.distributions as D
 
 import robomimic.utils.obs_utils as ObsUtils
@@ -127,6 +139,67 @@ class ResnetConv(torch.nn.Module):
         out_h = int(math.ceil(input_shape[1] / scale))
         out_w = int(math.ceil(input_shape[2] / scale))
         return (out_c, out_h, out_w)
+
+class CLIPVisionEmbedding(nn.Module):
+    """
+    Transformers의 CLIPVisionModel을 사용해 [B,C,H,W] 이미지를
+    패치 토큰 피처맵으로 복원하고 1x1 conv로 채널 정렬하여 반환.
+    기본: 224 입력 → 16x16 그리드, hidden_size→out_channels(기본 128).
+    """
+    def __init__(self,
+                 model_name: str = "openai/clip-vit-large-patch14",
+                 out_channels: int = 128,
+                 device: str = None,
+                 img_c: int = 3,
+                 pretrained: bool = True,
+                 **kwargs):
+        super().__init__()
+        try:
+            from transformers import CLIPVisionModel, CLIPImageProcessor
+        except Exception as e:
+            raise ImportError("transformers 패키지가 필요합니다. pip install transformers") from e
+
+        self.model_name = model_name
+        self.out_channels = out_channels
+        self._force_device = device
+        self._processor = CLIPImageProcessor.from_pretrained(model_name)
+        self._vision = CLIPVisionModel.from_pretrained(model_name)
+        try:
+            image_size = getattr(self._vision.config, "image_size", 224)
+            patch_size = getattr(self._vision.config, "patch_size", 14)
+            self._grid = int(image_size // patch_size)  # 보통 16
+        except Exception:
+            self._grid = 16
+        hidden_size = getattr(self._vision.config, "hidden_size", 1024)
+        self._proj = nn.Conv2d(hidden_size, out_channels, kernel_size=1, bias=False)
+
+    def _dev(self, x: torch.Tensor):
+        if self._force_device is not None:
+            return torch.device(self._force_device)
+        return x.device
+
+    def forward(self, x: torch.Tensor):
+        print("[PROOF] ==> CLIP Encoder (transformers.CLIPVisionModel) is being used.")
+        assert x.ndim == 4 and x.size(1) in (3, 1), f"Expected [B,C,H,W], got {tuple(x.shape)}"
+        B = x.shape[0]
+        dev = self._dev(x)
+        self._vision = self._vision.to(dev)
+        # processor는 PIL/tensor list를 받음
+        imgs = [xi.detach().cpu() for xi in x]
+        proc = self._processor(images=imgs, return_tensors="pt", do_rescale=False)
+        pixel_values = proc["pixel_values"].to(dev)
+        out = self._vision(pixel_values=pixel_values)
+        tokens = out.last_hidden_state[:, 1:, :]  # [B,N,D]
+        B, N, D = tokens.shape
+        S = int(N ** 0.5)
+        if S * S != N:
+            raise RuntimeError(f"CLIP tokens not square: N={N}")
+        fmap = tokens.transpose(1, 2).reshape(B, D, S, S)
+        fmap = self._proj(fmap)
+        return fmap
+
+    def output_shape(self, input_shape):
+        return (self.out_channels, self._grid, self._grid)
 
 class ResnetKeypoints(nn.Module):
     def __init__(self,
@@ -2327,7 +2400,28 @@ class DataAugGroup(torch.nn.Module):
             color_jitter = torchvision.transforms.ColorJitter(**aug_kwargs["color_jitter"])
             transforms.append(color_jitter)
         if self.use_random_erasing:
-            random_erasing = torchvision.transforms.RandomErasing(**aug_kwargs["random_erasing"])
+            # Normalize RandomErasing kwargs (OmegaConf ListConfig or scalar → tuple)
+            re_kwargs_in = aug_kwargs.get("random_erasing", {})
+            re_kwargs = dict(re_kwargs_in)
+            if "scale" in re_kwargs:
+                v = re_kwargs["scale"]
+                try:
+                    vt = tuple(v)
+                except Exception:
+                    vt = (float(v), float(v))
+                if len(vt) == 1:
+                    vt = (vt[0], vt[0])
+                re_kwargs["scale"] = vt
+            if "ratio" in re_kwargs:
+                v = re_kwargs["ratio"]
+                try:
+                    vt = tuple(v)
+                except Exception:
+                    vt = (float(v), float(v))
+                if len(vt) == 1:
+                    vt = (vt[0], vt[0])
+                re_kwargs["ratio"] = vt
+            random_erasing = torchvision.transforms.RandomErasing(**re_kwargs)
             transforms.append(random_erasing)
 
         self.transforms = torchvision.transforms.Compose(transforms)
@@ -2476,7 +2570,8 @@ class RPNPretrained(torch.nn.Module):
                  no_stride=False):
 
         super().__init__()
-        from detection_bc.centernet_module import load_centernet_rpn
+        # Use in-repo centernet module (Detic/CenterNet2 based)
+        from viola_bc.centernet_module import load_centernet_rpn
 
         self.no_stride = no_stride
         if self.no_stride:

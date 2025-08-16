@@ -67,7 +67,7 @@ def init_buffer():
         'lang_goal': ''
     }
 
-def save_to_hdf5(buffer, data_dir, episode_idx=None):
+def save_to_hdf5(buffer, data_dir, intrinsics, episode_idx=None):
     if not os.path.isdir(data_dir):
         os.makedirs(data_dir, exist_ok=True)
 
@@ -80,7 +80,7 @@ def save_to_hdf5(buffer, data_dir, episode_idx=None):
 
     with h5py.File(save_path, 'w') as f:
         f.attrs['sim'] = False
-        f.attrs['task_name'] = os.path.basename(os.path.dirname(data_dir))
+        f.attrs['task_name'] = os.path.basename(os.path.normpath(data_dir))
         f.attrs['lang_goal'] = buffer['lang_goal']
 
         data_grp = f.create_group('data')
@@ -88,11 +88,15 @@ def save_to_hdf5(buffer, data_dir, episode_idx=None):
         
         obs_grp = demo_grp.create_group('obs')
         
-        # Images
-        obs_grp.create_dataset('cam_high_rgb', data=np.array(buffer['obs']['cam_high_rgb'], dtype=np.uint8))
-        obs_grp.create_dataset('cam_low_rgb', data=np.array(buffer['obs']['cam_low_rgb'], dtype=np.uint8))
-        obs_grp.create_dataset('cam_high_depth', data=np.array(buffer['obs']['cam_high_depth'], dtype=np.float32))
-        obs_grp.create_dataset('cam_low_depth', data=np.array(buffer['obs']['cam_low_depth'], dtype=np.float32))
+        # Images and Intrinsics
+        for i, cam_name in enumerate(['cam_high', 'cam_low']):
+            rgb_dset = obs_grp.create_dataset(f'{cam_name}_rgb', data=np.array(buffer['obs'][f'{cam_name}_rgb'], dtype=np.uint8))
+            depth_dset = obs_grp.create_dataset(f'{cam_name}_depth', data=np.array(buffer['obs'][f'{cam_name}_depth'], dtype=np.uint16))
+            
+            cam_intrinsics = intrinsics[i]
+            for key, value in cam_intrinsics.items():
+                 rgb_dset.attrs[key] = value
+                 depth_dset.attrs[key] = value
 
         # Proprioception
         obs_grp.create_dataset('joint_positions', data=np.array(buffer['obs']['joint_positions'], dtype=np.float64))
@@ -104,11 +108,10 @@ def save_to_hdf5(buffer, data_dir, episode_idx=None):
         # Actions
         demo_grp.create_dataset('actions', data=np.array(buffer['action'], dtype=np.float64))
         
-        # Add other necessary attributes/datasets if needed by downstream processing
-        # For example, robomimic might need 'dones'
         num_samples = len(buffer['action'])
-        demo_grp.create_dataset('dones', data=np.zeros(num_samples, dtype=np.bool_))
-        demo_grp['dones'][-1] = True
+        demo_grp.create_dataset('dones', data=np.zeros(num_samples, dtype=bool))
+        if num_samples > 0:
+            demo_grp['dones'][-1] = True
         
         demo_grp.attrs['num_samples'] = num_samples
         data_grp.attrs['num_demos'] = 1
@@ -149,17 +152,13 @@ def get_device_serials():
 def main():
     args = parse_args()
     
-    # Data directory setup
     today = datetime.now().strftime('%Y%m%d')
     data_dir = os.path.join(args.data_dir, args.task, today)
     print(f"Data will be saved in: {data_dir}")
 
-    # --- Hardware and ROS Setup ---
     serials = get_device_serials()
     pipelines = []
-    configs = []
-    
-    # Align depth to color
+    intrinsics = []
     align = rs.align(rs.stream.color)
 
     for i, serial in enumerate(serials):
@@ -168,9 +167,22 @@ def main():
         config.enable_device(serial)
         config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
         config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        profile = pipeline.start(config)
+        
+        depth_profile = rs.video_stream_profile(profile.get_stream(rs.stream.depth))
+        depth_intrinsics = depth_profile.get_intrinsics()
+        intrinsics.append({
+            'width': depth_intrinsics.width,
+            'height': depth_intrinsics.height,
+            'fx': depth_intrinsics.fx,
+            'fy': depth_intrinsics.fy,
+            'ppx': depth_intrinsics.ppx,
+            'ppy': depth_intrinsics.ppy,
+            'model': str(depth_intrinsics.model),
+            'coeffs': depth_intrinsics.coeffs,
+        })
+
         pipelines.append(pipeline)
-        configs.append(config)
-        pipeline.start(config)
         print(f"Camera {i} (Serial: {serial}) started.")
 
     try:
@@ -184,7 +196,7 @@ def main():
     global terminal, recording, latest_gripper_qpos
     recording = False
     terminal = False
-    latest_gripper_qpos = [0] # Default value
+    latest_gripper_qpos = [0]
 
     rospy.init_node("viclihd_data_collection")
     try:
@@ -200,9 +212,8 @@ def main():
     
     rate = rospy.Rate(20)
 
-    # Gripper value normalization constants (from example)
     MAX_GRIP = 1100.0
-    GRIPPER_OPEN_THRESHOLD = 0.9 # Assumes normalized value
+    GRIPPER_OPEN_THRESHOLD = 0.9
 
     print('s: start, q: stop, t: terminate')
 
@@ -213,7 +224,6 @@ def main():
             print("Terminating.")
             break
 
-        # --- Get Camera Data ---
         framesets = []
         try:
             for pipeline in pipelines:
@@ -228,7 +238,6 @@ def main():
         color_images = [np.asanyarray(afs.get_color_frame().get_data()) for afs in aligned_framesets]
         depth_images = [np.asanyarray(afs.get_depth_frame().get_data()) for afs in aligned_framesets]
 
-        # --- Display Images ---
         for i, (color_img, depth_img) in enumerate(zip(color_images, depth_images)):
             depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_img, alpha=0.03), cv2.COLORMAP_JET)
             display_img = np.hstack((color_img, depth_colormap))
@@ -236,44 +245,36 @@ def main():
         cv2.waitKey(1)
 
         if recording:
-            # --- Get Robot State ---
             current_jnt = np.array(GetCurrentSplitedJoint()) * np.pi / 180.0
             qpos_joint = current_jnt[:6]
-            
-            # Simple velocity calculation
-            qvel_joint = (qpos_joint - last_joint_pos) * 20 # Assuming 20Hz rate
+            qvel_joint = (qpos_joint - last_joint_pos) * 20
             last_joint_pos = qpos_joint
 
-            # Gripper state
             gripper_raw = latest_gripper_qpos[0]
             gripper_normalized = gripper_raw / MAX_GRIP
             gripper_open = 1.0 if gripper_normalized > GRIPPER_OPEN_THRESHOLD else 0.0
 
-            # EEF Pose
             if robot:
                 T = np.array(robot.fkine(current_jnt))
                 eef_pos = T[:3, 3]
                 eef_quat_wxyz = R.from_matrix(T[:3, :3]).as_quat()
                 eef_quat_xyzw = np.roll(eef_quat_wxyz, -1)
-            else: # Dummy values
+            else:
                 eef_pos = np.zeros(3)
                 eef_quat_xyzw = np.array([0,0,0,1])
             
             gripper_pose = np.concatenate([eef_pos, eef_quat_xyzw])
 
-            # --- Store Data in Buffer ---
-            # Observations
             buffer['obs']['cam_high_rgb'].append(color_images[0].copy())
             buffer['obs']['cam_low_rgb'].append(color_images[1].copy())
-            buffer['obs']['cam_high_depth'].append(depth_images[0].copy().astype(np.float32))
-            buffer['obs']['cam_low_depth'].append(depth_images[1].copy().astype(np.float32))
+            buffer['obs']['cam_high_depth'].append(depth_images[0].copy())
+            buffer['obs']['cam_low_depth'].append(depth_images[1].copy())
             buffer['obs']['joint_positions'].append(qpos_joint)
             buffer['obs']['joint_velocities'].append(qvel_joint)
             buffer['obs']['gripper_pose'].append(gripper_pose)
             buffer['obs']['gripper_open'].append(gripper_open)
-            buffer['obs']['gripper_joint_positions'].append(np.array([gripper_normalized, gripper_normalized])) # Mimic robosuite format
+            buffer['obs']['gripper_joint_positions'].append(np.array([gripper_normalized, gripper_normalized]))
 
-            # Action (e.g., target end-effector pose and gripper state)
             action = np.concatenate([gripper_pose, [gripper_open]])
             buffer['action'].append(action)
 
@@ -281,7 +282,7 @@ def main():
             while True:
                 user_input = input("Store demo data? (y/n): ").strip().lower()
                 if user_input == 'y':
-                    save_to_hdf5(buffer, data_dir)
+                    save_to_hdf5(buffer, data_dir, intrinsics)
                     print(f"Data stored.")
                     break
                 elif user_input == 'n':

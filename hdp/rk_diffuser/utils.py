@@ -9,10 +9,17 @@ import numpy as np
 import pytorch_kinematics as pk
 import torch
 import torch.nn.functional as F
-from rlbench.demo import Demo
+try:
+    from rlbench.demo import Demo as _RLBenchDemo
+    Demo = _RLBenchDemo
+except Exception:
+    # RLBench가 없는 환경(테스트/노트북)에서도 임포트 가능하도록 더미 타입 정의
+    class Demo:  # type: ignore
+        pass
 
 DTYPE = torch.float
-DEVICE = "cuda"
+# 노트북/테스트 기본값은 CPU로 강제
+DEVICE = "cpu"
 
 
 class Timer:

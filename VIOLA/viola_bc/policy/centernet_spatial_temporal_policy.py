@@ -33,8 +33,12 @@ class CenterNetSpatialTemporalPolicy(BasePolicy):
         #####################################################
         self.data_aug = eval(policy_cfg.data_aug.network)(**policy_cfg.data_aug.network_kwargs)
 
-        policy_cfg.img_aug.network_kwargs["input_shapes"] = (shape_meta["all_shapes"]["agentview_rgb"], shape_meta["all_shapes"]["eye_in_hand_rgb"])        
-        self.img_aug = eval(policy_cfg.img_aug.network)(**policy_cfg.img_aug.network_kwargs)
+        _img_aug_kwargs = dict(policy_cfg.img_aug.network_kwargs)
+        _img_aug_kwargs["input_shapes"] = (
+            shape_meta["all_shapes"]["agentview_rgb"],
+            shape_meta["all_shapes"]["eye_in_hand_rgb"],
+        )
+        self.img_aug = eval(policy_cfg.img_aug.network)(**_img_aug_kwargs)
 
 
         #####################################################
@@ -51,21 +55,23 @@ class CenterNetSpatialTemporalPolicy(BasePolicy):
         ### Spatial Projection ( same as the following projection)
         ###
         #####################################################        
-        policy_cfg.spatial_projection.network_kwargs["input_shape"] = input_shape
-        policy_cfg.spatial_projection.network_kwargs["out_dim"] = policy_cfg.projection.network_kwargs["out_dim"]
+        _spatial_kwargs = dict(policy_cfg.spatial_projection.network_kwargs)
+        _spatial_kwargs["input_shape"] = input_shape
+        _spatial_kwargs["out_dim"] = policy_cfg.projection.network_kwargs["out_dim"]
         print(input_shape)
-        self.spatial_projection = eval(policy_cfg.spatial_projection.network)(**policy_cfg.spatial_projection.network_kwargs)
+        self.spatial_projection = eval(policy_cfg.spatial_projection.network)(**_spatial_kwargs)
         
         #####################################################
         ###
         ### Object-centric Pooling
         ###
         #####################################################
-        if "spatial_scale" in policy_cfg.pooling.network_kwargs:
+        _pooling_kwargs = dict(policy_cfg.pooling.network_kwargs)
+        if "spatial_scale" in _pooling_kwargs:
             spatial_scale = input_shape[2] / original_img_scale
-            policy_cfg.pooling.network_kwargs["spatial_scale"] = spatial_scale
-        policy_cfg.pooling.network_kwargs["input_shape"] = input_shape
-        self.pooling = eval(policy_cfg.pooling.network)(**policy_cfg.pooling.network_kwargs)
+            _pooling_kwargs["spatial_scale"] = spatial_scale
+        _pooling_kwargs["input_shape"] = input_shape
+        self.pooling = eval(policy_cfg.pooling.network)(**_pooling_kwargs)
         input_shape = self.pooling.output_shape(input_shape)
         print("after pooling: ", input_shape)
 
@@ -75,9 +81,10 @@ class CenterNetSpatialTemporalPolicy(BasePolicy):
         ###
         #####################################################
         input_shape = (shape_meta["all_shapes"][self.bbox_name][0], ) + input_shape        
-        policy_cfg.projection.network_kwargs["input_shape"] = input_shape
+        _proj_kwargs = dict(policy_cfg.projection.network_kwargs)
+        _proj_kwargs["input_shape"] = input_shape
         print(input_shape)
-        self.projection = eval(policy_cfg.projection.network)(**policy_cfg.projection.network_kwargs)
+        self.projection = eval(policy_cfg.projection.network)(**_proj_kwargs)
         input_shape = self.projection.output_shape(input_shape)
 
         #####################################################
@@ -85,8 +92,9 @@ class CenterNetSpatialTemporalPolicy(BasePolicy):
         ### Processing bbox coordinates, usually with added noise
         ###
         #####################################################
-        policy_cfg.bbox_norm.network_kwargs["input_shape"] = input_shape
-        self.bbox_norm = eval(policy_cfg.bbox_norm.network)(**policy_cfg.bbox_norm.network_kwargs)
+        _bboxn_kwargs = dict(policy_cfg.bbox_norm.network_kwargs)
+        _bboxn_kwargs["input_shape"] = input_shape
+        self.bbox_norm = eval(policy_cfg.bbox_norm.network)(**_bboxn_kwargs)
 
         #####################################################
         ###
@@ -121,13 +129,13 @@ class CenterNetSpatialTemporalPolicy(BasePolicy):
 
         self.max_len = 10
 
-    def encode_fn(self, data):
+    def encode_fn(self, batch):
         #####################################################
         ### augmentation on images
         #####################################################        
-        batch_size = data["obs"]["agentview_rgb"].shape[0]
-        out = self.img_aug((data["obs"]["agentview_rgb"], data["obs"]["eye_in_hand_rgb"]))
-        out, data["obs"]["eye_in_hand_rgb"] = self.data_aug(out)        
+        batch_size = batch["obs"]["agentview_rgb"].shape[0]
+        out = self.img_aug((batch["obs"]["agentview_rgb"], batch["obs"]["eye_in_hand_rgb"]))
+        out, batch["obs"]["eye_in_hand_rgb"] = self.data_aug(out)        
         
 
         #####################################################
@@ -140,7 +148,7 @@ class CenterNetSpatialTemporalPolicy(BasePolicy):
         #####################################################
         ### Pooling on spatial feature maps
         #####################################################        
-        bbox = data["obs"][self.bbox_name]
+        bbox = batch["obs"][self.bbox_name]
         bbox_list = bbox_batch_to_list(bbox)
         self.pooling_out = self.pooling(self.encoder_out, bbox_list)
         self.projection_out = self.projection(self.pooling_out)
@@ -153,7 +161,7 @@ class CenterNetSpatialTemporalPolicy(BasePolicy):
         ### Position embedding out
         #####################################################
         self.position_embedding_out = self.bbox_position_embedding(self.projection_out, normalized_bbox)
-        self.position_embedding_out = self.grouping(self.spatial_projection_out, self.position_embedding_out, data["obs"])
+        self.position_embedding_out = self.grouping(self.spatial_projection_out, self.position_embedding_out, batch["obs"])
 
         return self.position_embedding_out
 
